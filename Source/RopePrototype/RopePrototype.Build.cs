@@ -1,4 +1,5 @@
-// Summary: Build rules for the RopePrototype module.
+
+/// Build rules for the RopePrototype module.
 using UnrealBuildTool;
 
 public class RopePrototype : ModuleRules
@@ -13,13 +14,17 @@ public class RopePrototype : ModuleRules
             "Core",
             "CoreUObject",
             "Engine",
-            "InputCore"
+            "InputCore",
+            "EnhancedInput",
+            "CableComponent",
+            "UMG"
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
         {
             "Slate",
-            "SlateCore"
+            "SlateCore",
+            "EnhancedInput"
         });
     }
 }

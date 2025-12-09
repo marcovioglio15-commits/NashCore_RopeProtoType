@@ -21,6 +21,7 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     MinRopeLength = 200.0f;
     ThrowSpeed = 2400.0f;
     RecallHoldSeconds = 1.0f;
+    RecallRetractSpeed = 2600.0f;
     SwingAcceleration = 600.0f;
     SwingDamping = 0.05f;
     ClimbSpeed = 200.0f;
@@ -37,6 +38,14 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     RecallAccumulated = 0.0f;
     ClimbInputSign = 0;
     SavedGravityScale = 1.0f;
+    bHasPreview = false;
+    bPreviewWithinRange = false;
+    PreviewImpactPoint = FVector::ZeroVector;
+    PreviewImpactNormal = FVector::ZeroVector;
+    RopeFlightElapsed = 0.0f;
+    RopeFlightDuration = 0.0f;
+    RopeFlightStart = FVector::ZeroVector;
+    RopeFlightTarget = FVector::ZeroVector;
 }
 
 void UBPC_RopeTraversalComponent::BeginPlay()
@@ -61,13 +70,20 @@ void UBPC_RopeTraversalComponent::TickComponent(const float DeltaTime, const ELe
         return;
     }
 
+    if (RopeState == ERopeState::Airborne)
+    {
+        TickRopeFlight(DeltaTime);
+        return;
+    }
+
     // Process recall hold timer while player is pulling rope back.
     if (RopeState == ERopeState::Recalling)
     {
         RecallAccumulated += DeltaTime;
+        CurrentRopeLength = FMath::Max(CurrentRopeLength - RecallRetractSpeed * DeltaTime, 0.0f);
 
         // Clear rope if recall timer completes.
-        if (RecallAccumulated >= RecallHoldSeconds)
+        if (RecallAccumulated >= RecallHoldSeconds || CurrentRopeLength <= KINDA_SMALL_NUMBER)
         {
             ClearRope();
         }
@@ -79,6 +95,13 @@ void UBPC_RopeTraversalComponent::TickComponent(const float DeltaTime, const ELe
     if (RopeState == ERopeState::Hanging)
     {
         TickHanging(DeltaTime);
+        return;
+    }
+
+    // Maintain ground tether when holding rope on foot.
+    if (RopeState == ERopeState::Attached && bHoldingRope)
+    {
+        TickTether(DeltaTime);
     }
 }
 #pragma endregion Tick
@@ -87,6 +110,10 @@ void UBPC_RopeTraversalComponent::TickComponent(const float DeltaTime, const ELe
 void UBPC_RopeTraversalComponent::StartAim()
 {
     // Enter aiming mode and enable ticking for preview.
+    bHasPreview = false;
+    bPreviewWithinRange = false;
+    PreviewImpactPoint = FVector::ZeroVector;
+    PreviewImpactNormal = FVector::ZeroVector;
     RopeState = ERopeState::Aiming;
     SetComponentTickEnabled(true);
 }
@@ -102,7 +129,7 @@ void UBPC_RopeTraversalComponent::StopAim()
     // Keep tick alive only if hanging requires simulation.
     if (RopeState == ERopeState::Idle || RopeState == ERopeState::Attached)
     {
-        const bool bNeedsTick = bHanging;
+        const bool bNeedsTick = bHanging || bHoldingRope;
         SetComponentTickEnabled(bNeedsTick);
     }
 }
@@ -115,56 +142,62 @@ void UBPC_RopeTraversalComponent::ThrowRope()
         return;
     }
 
-    // Gather current view origin and rotation for trace direction.
-    FVector ViewLocation = FVector::ZeroVector;
-    FRotator ViewRotation = FRotator::ZeroRotator;
+    const bool bHadPreview = bHasPreview;
+    const FVector SavedPreviewPoint = PreviewImpactPoint;
+    const FVector SavedPreviewNormal = PreviewImpactNormal;
+    const bool bSavedPreviewRange = bPreviewWithinRange;
 
-    if (APlayerController* const PC = Cast<APlayerController>(OwningCharacter->GetController()))
+    if (bRopeAttached || bHoldingRope || bHanging)
     {
-        PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+        ClearRope();
+
+        if (bHadPreview)
+        {
+            bHasPreview = true;
+            PreviewImpactPoint = SavedPreviewPoint;
+            PreviewImpactNormal = SavedPreviewNormal;
+            bPreviewWithinRange = bSavedPreviewRange;
+            RopeState = ERopeState::Aiming;
+            SetComponentTickEnabled(true);
+        }
     }
-    else
+
+    if (bHanging)
+        ExitHanging();
+
+    bRopeAttached = false;
+    bHoldingRope = false;
+    bHanging = false;
+
+    if (!bHasPreview)
     {
-        ViewLocation = OwningCharacter->GetActorLocation();
-        ViewRotation = OwningCharacter->GetActorRotation();
-    }
-
-    // Trace forward up to max rope length to find anchor.
-    const FVector TraceStart = ViewLocation;
-    const FVector TraceEnd = TraceStart + ViewRotation.Vector() * MaxRopeLength;
-
-    FHitResult HitResult;
-    FCollisionQueryParams Params;
-    Params.AddIgnoredActor(OwningCharacter.Get());
-
-    const bool bHit = GetWorld()->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, Params);
-
-    // Abort if no surface is hit.
-    if (!bHit)
-    {
-        RopeState = ERopeState::Idle;
+        RopeState = RopeState == ERopeState::Aiming ? ERopeState::Aiming : ERopeState::Idle;
         bRopeAttached = false;
         return;
     }
 
-    // Store anchor data and clamp rope length to distance.
-    AnchorLocation = HitResult.ImpactPoint;
-    AnchorNormal = HitResult.ImpactNormal;
+    RopeFlightStart = OwningCharacter->GetActorLocation();
+    RopeFlightTarget = PreviewImpactPoint;
+    const float Distance = FVector::Distance(RopeFlightStart, RopeFlightTarget);
+    RopeFlightDuration = Distance > KINDA_SMALL_NUMBER ? Distance / ThrowSpeed : 0.0f;
 
-    const float DistanceToAnchor = FVector::Distance(OwningCharacter->GetActorLocation(), AnchorLocation);
-    CurrentRopeLength = FMath::Clamp(DistanceToAnchor, MinRopeLength, MaxRopeLength);
-    bRopeAttached = true;
-    bHoldingRope = DistanceToAnchor <= MaxRopeLength;
+    if (RopeFlightDuration <= KINDA_SMALL_NUMBER)
+    {
+        AnchorLocation = RopeFlightTarget;
+        AnchorNormal = PreviewImpactNormal;
+        CurrentRopeLength = FMath::Clamp(Distance, MinRopeLength, MaxRopeLength);
+        bRopeAttached = true;
+        bHoldingRope = Distance <= MaxRopeLength;
+        if (bHoldingRope)
+            EngageHoldConstraint();
+        else
+            RopeState = ERopeState::Attached;
+        return;
+    }
 
-    // Auto-enter hanging if within rope length, otherwise stay attached.
-    if (bHoldingRope)
-    {
-        EnterHanging();
-    }
-    else
-    {
-        RopeState = ERopeState::Attached;
-    }
+    RopeFlightElapsed = 0.0f;
+    RopeState = ERopeState::Airborne;
+    SetComponentTickEnabled(true);
 }
 #pragma endregion Aim And Throw
 
@@ -181,6 +214,7 @@ void UBPC_RopeTraversalComponent::ToggleHoldRequest()
     if (bHoldingRope)
     {
         ReleaseRope(false);
+        BeginRecall();
         return;
     }
 
@@ -196,7 +230,7 @@ void UBPC_RopeTraversalComponent::ToggleHoldRequest()
     if (Distance <= GrabDistance)
     {
         bHoldingRope = true;
-        EnterHanging();
+        EngageHoldConstraint();
     }
 }
 
@@ -210,6 +244,11 @@ void UBPC_RopeTraversalComponent::BeginRecall()
 
     // Reset timer and enter recall state to monitor hold duration.
     RecallAccumulated = 0.0f;
+    bHoldingRope = false;
+    if (bHanging)
+    {
+        ExitHanging();
+    }
     RopeState = ERopeState::Recalling;
     SetComponentTickEnabled(true);
 }
@@ -221,10 +260,11 @@ void UBPC_RopeTraversalComponent::CancelRecall()
     {
         RopeState = bHanging ? ERopeState::Hanging : ERopeState::Attached;
         RecallAccumulated = 0.0f;
+        CurrentRopeLength = FMath::Max(CurrentRopeLength, MinRopeLength);
     }
 
     // Disable tick when nothing requires simulation.
-    if (!bHanging)
+    if (!bHanging && !bHoldingRope)
     {
         SetComponentTickEnabled(false);
     }
@@ -287,6 +327,9 @@ void UBPC_RopeTraversalComponent::ReleaseRope(const bool bJumpRelease)
 
     bHoldingRope = false;
     RopeState = bRopeAttached ? ERopeState::Attached : ERopeState::Idle;
+
+    if (!bHanging && (RopeState == ERopeState::Idle || RopeState == ERopeState::Attached))
+        SetComponentTickEnabled(false);
 }
 
 bool UBPC_RopeTraversalComponent::IsAttached() const
@@ -323,6 +366,36 @@ FVector UBPC_RopeTraversalComponent::GetAnchorLocation() const
     // Provide anchor location for debug purposes.
     return AnchorLocation;
 }
+
+bool UBPC_RopeTraversalComponent::HasValidPreview() const
+{
+    return bHasPreview;
+}
+
+FVector UBPC_RopeTraversalComponent::GetPreviewLocation() const
+{
+    return PreviewImpactPoint;
+}
+
+bool UBPC_RopeTraversalComponent::IsPreviewWithinRange() const
+{
+    return bPreviewWithinRange;
+}
+
+bool UBPC_RopeTraversalComponent::IsRecalling() const
+{
+    return RopeState == ERopeState::Recalling;
+}
+
+bool UBPC_RopeTraversalComponent::IsRopeInFlight() const
+{
+    return RopeState == ERopeState::Airborne;
+}
+
+float UBPC_RopeTraversalComponent::GetCurrentRopeLength() const
+{
+    return CurrentRopeLength;
+}
 #pragma endregion Release And Query
 
 #pragma region Helpers
@@ -331,6 +404,7 @@ void UBPC_RopeTraversalComponent::UpdateAimPreview()
     // Skip when no owner exists.
     if (!OwningCharacter.IsValid())
     {
+        bHasPreview = false;
         return;
     }
 
@@ -361,14 +435,44 @@ void UBPC_RopeTraversalComponent::UpdateAimPreview()
     // Exit if nothing hit to preview.
     if (!bHit)
     {
+        bHasPreview = false;
+        bPreviewWithinRange = false;
         return;
     }
 
-    // Pick preview color based on reachability.
-    const bool bWithinRange = FVector::Distance(OwningCharacter->GetActorLocation(), HitResult.ImpactPoint) <= MaxRopeLength;
+    bHasPreview = true;
+    PreviewImpactPoint = HitResult.ImpactPoint;
+    PreviewImpactNormal = HitResult.ImpactNormal;
+    bPreviewWithinRange = FVector::Distance(OwningCharacter->GetActorLocation(), HitResult.ImpactPoint) <= MaxRopeLength;
+}
 
-    const FColor PreviewColor = bWithinRange ? FColor::Green : FColor::Red;
-    DrawDebugSphere(GetWorld(), HitResult.ImpactPoint, 8.0f, 12, PreviewColor, false, 0.016f);
+void UBPC_RopeTraversalComponent::TickRopeFlight(const float DeltaTime)
+{
+    RopeFlightElapsed += DeltaTime;
+    const float Alpha = RopeFlightDuration > KINDA_SMALL_NUMBER ? FMath::Clamp(RopeFlightElapsed / RopeFlightDuration, 0.0f, 1.0f) : 1.0f;
+    const FVector FlatPosition = FMath::Lerp(RopeFlightStart, RopeFlightTarget, Alpha);
+    const float Distance = FVector::Distance(RopeFlightStart, RopeFlightTarget);
+    const float ArcHeight = FMath::Clamp(Distance * 0.25f, 120.0f, 600.0f);
+    const float VerticalOffset = FMath::Sin(Alpha * PI) * ArcHeight;
+    AnchorLocation = FlatPosition + FVector::UpVector * VerticalOffset;
+
+    if (Alpha >= 1.0f - KINDA_SMALL_NUMBER)
+        CompleteRopeFlight();
+}
+
+void UBPC_RopeTraversalComponent::CompleteRopeFlight()
+{
+    RopeFlightElapsed = 0.0f;
+    RopeState = ERopeState::Attached;
+    AnchorLocation = RopeFlightTarget;
+    AnchorNormal = PreviewImpactNormal;
+    CurrentRopeLength = FMath::Clamp(FVector::Distance(OwningCharacter.IsValid() ? OwningCharacter->GetActorLocation() : RopeFlightStart, AnchorLocation), MinRopeLength, MaxRopeLength);
+    bRopeAttached = true;
+    bHoldingRope = bPreviewWithinRange;
+    if (bHoldingRope)
+        EngageHoldConstraint();
+    else
+        SetComponentTickEnabled(false);
 }
 
 void UBPC_RopeTraversalComponent::EnterHanging()
@@ -385,7 +489,7 @@ void UBPC_RopeTraversalComponent::EnterHanging()
         return;
     }
 
-    // Switch movement to flying with zero gravity to simulate rope hang.
+    // Switch to falling while keeping gravity for natural rope tension.
     UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
 
     if (MoveComp == nullptr)
@@ -394,8 +498,16 @@ void UBPC_RopeTraversalComponent::EnterHanging()
     }
 
     SavedGravityScale = MoveComp->GravityScale;
-    MoveComp->SetMovementMode(MOVE_Flying);
-    MoveComp->GravityScale = 0.0f;
+    MoveComp->SetMovementMode(MOVE_Falling);
+    MoveComp->GravityScale = SavedGravityScale;
+    const FVector AnchorToActor = OwningCharacter->GetActorLocation() - AnchorLocation;
+    const float Distance = AnchorToActor.Size();
+    if (Distance > KINDA_SMALL_NUMBER)
+    {
+        const FVector RopeDir = AnchorToActor / Distance;
+        const float RadialSpeed = FVector::DotProduct(MoveComp->Velocity, RopeDir);
+        MoveComp->Velocity -= RopeDir * RadialSpeed;
+    }
     bHanging = true;
     RopeState = ERopeState::Hanging;
     SetComponentTickEnabled(true);
@@ -414,7 +526,7 @@ void UBPC_RopeTraversalComponent::ExitHanging()
     if (MoveComp != nullptr)
     {
         MoveComp->GravityScale = SavedGravityScale;
-        MoveComp->SetMovementMode(MOVE_Falling);
+        MoveComp->SetMovementMode(MoveComp->IsMovingOnGround() ? MOVE_Walking : MOVE_Falling);
     }
 
     bHanging = false;
@@ -446,8 +558,15 @@ void UBPC_RopeTraversalComponent::TickHanging(const float DeltaTime)
         return;
     }
 
-    // Compute rope vector to anchor for constraint calculations.
-    FVector RopeVector = OwningCharacter->GetActorLocation() - AnchorLocation;
+    if (MoveComp->IsMovingOnGround() && MoveComp->CurrentFloor.bBlockingHit && MoveComp->CurrentFloor.HitResult.ImpactNormal.Z >= 0.85f)
+    {
+        ExitHanging();
+        RopeState = bRopeAttached ? ERopeState::Attached : ERopeState::Idle;
+        return;
+    }
+
+    const FVector ActorLocation = OwningCharacter->GetActorLocation();
+    FVector RopeVector = ActorLocation - AnchorLocation;
     const float Distance = RopeVector.Size();
 
     // Avoid division by zero when extremely close.
@@ -456,23 +575,38 @@ void UBPC_RopeTraversalComponent::TickHanging(const float DeltaTime)
         return;
     }
 
-    const FVector RopeDir = RopeVector / Distance;
     // Update current rope length based on climb input.
     CurrentRopeLength = FMath::Clamp(CurrentRopeLength - ClimbInputSign * ClimbSpeed * DeltaTime, MinRopeLength, MaxRopeLength);
 
+    const FVector RopeDir = RopeVector / Distance;
     // Build tangential acceleration from cached swing input relative to rope.
     FVector TangentAccel = OwningCharacter->GetActorForwardVector() * PendingSwingInput.Y + OwningCharacter->GetActorRightVector() * PendingSwingInput.X;
     TangentAccel = TangentAccel - FVector::DotProduct(TangentAccel, RopeDir) * RopeDir;
 
-    // Apply swing acceleration and remove radial velocity to keep on rope.
-    MoveComp->Velocity += TangentAccel * SwingAcceleration * DeltaTime;
-    MoveComp->Velocity -= FVector::DotProduct(MoveComp->Velocity, RopeDir) * RopeDir;
-    // Dampen swing to avoid infinite energy gain.
-    MoveComp->Velocity *= FMath::Clamp(1.0f - SwingDamping * DeltaTime, 0.0f, 1.0f);
+    const FVector Gravity = FVector(0.0f, 0.0f, GetWorld()->GetGravityZ() * MoveComp->GravityScale);
+    const FVector TangentGravity = Gravity - FVector::DotProduct(Gravity, RopeDir) * RopeDir;
 
-    // Place character at constrained position along rope.
+    // Apply tangential swing input and gravity while keeping rope length.
+    MoveComp->Velocity += (TangentAccel * SwingAcceleration + TangentGravity) * DeltaTime;
+    const float RadialSpeed = FVector::DotProduct(MoveComp->Velocity, RopeDir);
+    MoveComp->Velocity -= RopeDir * RadialSpeed;
+
+    const float DampingScale = PendingSwingInput.IsNearlyZero() ? SwingDamping * 2.0f : SwingDamping;
+    MoveComp->Velocity *= FMath::Clamp(1.0f - DampingScale * DeltaTime, 0.0f, 1.0f);
+
+    // Place character at constrained position along rope with collision support.
     const FVector TargetLocation = AnchorLocation + RopeDir * CurrentRopeLength;
-    OwningCharacter->SetActorLocation(TargetLocation, false);
+    const FVector Delta = TargetLocation - ActorLocation;
+
+    if (MoveComp->UpdatedComponent != nullptr)
+    {
+        FHitResult Hit;
+        MoveComp->SafeMoveUpdatedComponent(Delta, OwningCharacter->GetActorRotation(), true, Hit);
+    }
+    else
+    {
+        OwningCharacter->SetActorLocation(TargetLocation, false);
+    }
 
     // Clear swing input after applying.
     PendingSwingInput = FVector2D::ZeroVector;
@@ -482,6 +616,78 @@ void UBPC_RopeTraversalComponent::TickHanging(const float DeltaTime)
     {
         TryClimbToLedge();
     }
+}
+
+void UBPC_RopeTraversalComponent::TickTether(const float DeltaTime)
+{
+    if (!OwningCharacter.IsValid())
+    {
+        ClearRope();
+        return;
+    }
+
+    UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
+
+    if (MoveComp == nullptr)
+    {
+        ClearRope();
+        return;
+    }
+
+    CurrentRopeLength = FMath::Clamp(CurrentRopeLength - ClimbInputSign * ClimbSpeed * DeltaTime, MinRopeLength, MaxRopeLength);
+
+    const FVector ActorLocation = OwningCharacter->GetActorLocation();
+    const FVector RopeVector = ActorLocation - AnchorLocation;
+    const float Distance = RopeVector.Size();
+
+    if (Distance <= KINDA_SMALL_NUMBER)
+    {
+        return;
+    }
+
+    const FVector RopeDir = RopeVector / Distance;
+    const bool bBeyondLength = Distance > CurrentRopeLength;
+
+    if (bBeyondLength)
+    {
+        const FVector TargetLocation = AnchorLocation + RopeDir * CurrentRopeLength;
+        OwningCharacter->SetActorLocation(TargetLocation, false);
+        const FVector OutwardVelocity = FVector::DotProduct(MoveComp->Velocity, RopeDir) * RopeDir;
+        const float DampingAlpha = FMath::Clamp(1.0f - SwingDamping * DeltaTime, 0.0f, 1.0f);
+        MoveComp->Velocity = (MoveComp->Velocity - OutwardVelocity) * DampingAlpha;
+    }
+
+    const float EffectiveDistance = bBeyondLength ? CurrentRopeLength : Distance;
+    const bool bTensioned = EffectiveDistance >= CurrentRopeLength - 1.5f;
+
+    if (bTensioned && !MoveComp->IsMovingOnGround())
+    {
+        EnterHanging();
+    }
+}
+
+void UBPC_RopeTraversalComponent::EngageHoldConstraint()
+{
+    if (!OwningCharacter.IsValid() || !bRopeAttached)
+    {
+        return;
+    }
+
+    bHoldingRope = true;
+    RopeState = ERopeState::Attached;
+
+    const float Distance = FVector::Distance(OwningCharacter->GetActorLocation(), AnchorLocation);
+    CurrentRopeLength = FMath::Clamp(Distance, MinRopeLength, MaxRopeLength);
+
+    UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
+
+    if (MoveComp != nullptr && !MoveComp->IsMovingOnGround() && Distance >= CurrentRopeLength - 1.0f)
+    {
+        EnterHanging();
+        return;
+    }
+
+    SetComponentTickEnabled(true);
 }
 
 void UBPC_RopeTraversalComponent::TryClimbToLedge()
@@ -502,26 +708,34 @@ void UBPC_RopeTraversalComponent::TryClimbToLedge()
 
     const bool bHit = GetWorld()->SweepSingleByChannel(HitResult, ProbeStart, ProbeEnd, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(LedgeProbeRadius), Params);
 
-    // Exit if no ledge is detected.
-    if (!bHit)
-    {
-        return;
-    }
-
-    // Reject ledges facing away from anchor normal.
-    const float NormalDot = FVector::DotProduct(HitResult.ImpactNormal, AnchorNormal);
-
-    if (NormalDot < LedgeNormalDotThreshold)
-    {
-        return;
-    }
-
-    // Compute placement location using character collision height.
     const float CapsuleHalfHeight = OwningCharacter->GetSimpleCollisionHalfHeight();
-    const FVector TargetLocation = HitResult.ImpactPoint + FVector::UpVector * CapsuleHalfHeight;
+    const FVector FallbackTarget = AnchorLocation + FVector::UpVector * CapsuleHalfHeight;
+    FVector TargetLocation = FallbackTarget;
 
-    // Move character onto ledge and release rope.
-    OwningCharacter->SetActorLocation(TargetLocation, false);
+    if (bHit)
+    {
+        const float NormalDot = FVector::DotProduct(HitResult.ImpactNormal, AnchorNormal);
+
+        if (NormalDot >= LedgeNormalDotThreshold)
+        {
+            TargetLocation = HitResult.ImpactPoint + FVector::UpVector * CapsuleHalfHeight + AnchorNormal * 18.0f;
+        }
+    }
+
+    UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
+
+    if (MoveComp != nullptr && MoveComp->UpdatedComponent != nullptr)
+    {
+        FHitResult MoveHit;
+        const FVector Delta = TargetLocation - OwningCharacter->GetActorLocation();
+        MoveComp->SafeMoveUpdatedComponent(Delta, OwningCharacter->GetActorRotation(), true, MoveHit);
+        MoveComp->SetMovementMode(MOVE_Walking);
+    }
+    else
+    {
+        OwningCharacter->SetActorLocation(TargetLocation, false);
+    }
+
     ReleaseRope(false);
 }
 
@@ -535,6 +749,15 @@ void UBPC_RopeTraversalComponent::ClearRope()
     RecallAccumulated = 0.0f;
     ClimbInputSign = 0;
     PendingSwingInput = FVector2D::ZeroVector;
+    bHasPreview = false;
+    bPreviewWithinRange = false;
+    PreviewImpactPoint = FVector::ZeroVector;
+    PreviewImpactNormal = FVector::ZeroVector;
+    RopeFlightElapsed = 0.0f;
+    RopeFlightDuration = 0.0f;
+    RopeFlightStart = FVector::ZeroVector;
+    RopeFlightTarget = FVector::ZeroVector;
+    CurrentRopeLength = MaxRopeLength;
     SetComponentTickEnabled(false);
 }
 #pragma endregion Helpers

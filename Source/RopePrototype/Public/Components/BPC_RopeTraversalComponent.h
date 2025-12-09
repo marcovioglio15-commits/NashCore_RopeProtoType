@@ -81,6 +81,24 @@ public:
 
     // Summary: Provides anchor location for debug draw.
     FVector GetAnchorLocation() const;
+
+    // Summary: Returns whether aim preview hit is valid.
+    bool HasValidPreview() const;
+
+    // Summary: Returns last aim preview location.
+    FVector GetPreviewLocation() const;
+
+    // Summary: Returns whether preview is within rope reach.
+    bool IsPreviewWithinRange() const;
+
+    // Summary: Returns whether rope is currently recalling.
+    bool IsRecalling() const;
+
+    // Summary: Returns whether rope is mid-flight toward anchor.
+    bool IsRopeInFlight() const;
+
+    // Summary: Returns current rope length used for simulation.
+    float GetCurrentRopeLength() const;
 #pragma endregion Methods
 
 protected:
@@ -101,6 +119,10 @@ protected:
     // Summary: Time the recall input must be held.
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Hold duration in seconds before the rope returns to the player", AllowPrivateAccess="true"))
     float RecallHoldSeconds;
+
+    // Summary: Retraction speed used while recalling rope.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Speed used to retract rope while recalling in centimeters per second", AllowPrivateAccess="true"))
+    float RecallRetractSpeed;
 
     // Summary: Acceleration applied while swinging.
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Swing acceleration tangential to the rope in centimeters per second squared", AllowPrivateAccess="true"))
@@ -163,6 +185,30 @@ protected:
 
     // Summary: Cached gravity scale before entering hanging.
     float SavedGravityScale;
+
+    // Summary: Whether preview trace has a valid hit.
+    bool bHasPreview;
+
+    // Summary: Whether preview is within rope reach.
+    bool bPreviewWithinRange;
+
+    // Summary: Cached preview impact point.
+    FVector PreviewImpactPoint;
+
+    // Summary: Cached preview impact normal.
+    FVector PreviewImpactNormal;
+
+    // Summary: Rope flight progress elapsed seconds.
+    float RopeFlightElapsed;
+
+    // Summary: Rope flight duration seconds.
+    float RopeFlightDuration;
+
+    // Summary: Rope flight start location.
+    FVector RopeFlightStart;
+
+    // Summary: Rope flight target location.
+    FVector RopeFlightTarget;
 #pragma endregion State
 #pragma endregion Variables And Properties
 
@@ -171,6 +217,12 @@ private:
 #pragma region Helpers
     // Summary: Updates aim trace and preview.
     void UpdateAimPreview();
+
+    // Summary: Advances rope flight arc toward anchor.
+    void TickRopeFlight(float DeltaTime);
+
+    // Summary: Finalizes rope flight and attaches.
+    void CompleteRopeFlight();
 
     // Summary: Begins hanging state if allowed.
     void EnterHanging();
@@ -181,8 +233,14 @@ private:
     // Summary: Advances swing simulation and length adjustments.
     void TickHanging(float DeltaTime);
 
+    // Summary: Applies ground tether constraint while holding the rope.
+    void TickTether(float DeltaTime);
+
     // Summary: Attempts to climb ledge near anchor.
     void TryClimbToLedge();
+
+    // Summary: Chooses hang or tether mode when grabbing rope.
+    void EngageHoldConstraint();
 
     // Summary: Clears anchor and resets rope.
     void ClearRope();

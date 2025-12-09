@@ -8,5 +8,8 @@ AGM_Core::AGM_Core()
 {
     // Set the default pawn to the custom player character.
     DefaultPawnClass = ABPA_PlayerCharacter::StaticClass();
+
+    // Apply the HUD override if assigned.
+    HUDClass = HUDClassOverride;
 }
 #pragma endregion Methods
