@@ -99,6 +99,9 @@ public:
 
     // Summary: Returns current rope length used for simulation.
     float GetCurrentRopeLength() const;
+
+    // Summary: Attempts ledge climb transition triggered by jump.
+    bool RequestLedgeClimbFromJump();
 #pragma endregion Methods
 
 protected:
@@ -209,6 +212,9 @@ protected:
 
     // Summary: Rope flight target location.
     FVector RopeFlightTarget;
+
+    // Summary: Tracks aim preview when rope already attached.
+    bool bAimPreviewWhileAttached;
 #pragma endregion State
 #pragma endregion Variables And Properties
 
@@ -237,13 +243,19 @@ private:
     void TickTether(float DeltaTime);
 
     // Summary: Attempts to climb ledge near anchor.
-    void TryClimbToLedge();
+    bool TryClimbToLedge();
 
     // Summary: Chooses hang or tether mode when grabbing rope.
     void EngageHoldConstraint();
 
     // Summary: Clears anchor and resets rope.
     void ClearRope();
+
+    // Summary: Checks whether climb input is allowed in current state.
+    bool CanProcessClimbInput() const;
+
+    // Summary: Adjusts rope length from climb input with safety clamps.
+    void ApplyClimbLengthChange(float DeltaTime);
 #pragma endregion Helpers
 #pragma endregion Methods
 };

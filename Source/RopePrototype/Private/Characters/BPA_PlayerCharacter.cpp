@@ -542,12 +542,15 @@ void ABPA_PlayerCharacter::HandleLookPitch(const FInputActionValue& Value)
 
 #pragma region Jump And Aim
 
-/// Starts jump logic, releasing rope if hanging.
+/// Starts jump logic and routes hanging jump into ledge climb.
 void ABPA_PlayerCharacter::StartJump()
 {
     if (RopeComponent != nullptr && RopeComponent->IsHanging())
     {
-        RopeComponent->ReleaseRope(true);
+        if (RopeComponent->RequestLedgeClimbFromJump())
+            return;
+
+        // Ignore jump input while attached to the rope to keep the tether intact.
         return;
     }
 
