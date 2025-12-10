@@ -3,6 +3,8 @@
 #include "Characters/BPA_PlayerCharacter.h"
 
 #include "Camera/CameraComponent.h"
+#include "Camera/CameraShakeBase.h"
+#include "Camera/PlayerCameraManager.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -69,8 +71,10 @@ ABPA_PlayerCharacter::ABPA_PlayerCharacter()
     RespawnDelay = 1.75f;
     DeathFadeSeconds = 1.0f;
     FallShakeRampSeconds = 0.65f;
+    FallCameraShakeClass = nullptr;
     TimerTickRate = 0.05f;
     PitchConeAngleDegrees = 90.0f;
+    bInvertAimLookPitch = false;
     MovementInputInterpSpeedWalking = 8.0f;
     MovementInputInterpSpeedSwinging = 4.0f;
     bBuildRuntimeDefaults = true;
@@ -100,6 +104,9 @@ ABPA_PlayerCharacter::ABPA_PlayerCharacter()
     SmoothedMoveInput = FVector2D::ZeroVector;
     NeutralPitchDegrees = GetActorRotation().Pitch;
     bWasHanging = false;
+    bDeathSequenceActive = false;
+    LastFallShakeScale = 0.0f;
+    ActiveFallShake = nullptr;
     PlayerInputContext = nullptr;
     MoveAction = nullptr;
     TurnAction = nullptr;
@@ -245,9 +252,19 @@ void ABPA_PlayerCharacter::Tick(const float DeltaSeconds)
         const float CurrentFallDistance = FallStartZ - GetActorLocation().Z;
 
         if (CurrentFallDistance > FatalFallHeight)
+        {
             FallOverThresholdTime += DeltaSeconds;
+            ApplyFallCameraFeedback();
+        }
         else
+        {
             FallOverThresholdTime = 0.0f;
+            StopFallCameraFeedback();
+        }
+    }
+    else
+    {
+        StopFallCameraFeedback();
     }
 }
 #pragma endregion Tick
@@ -526,6 +543,8 @@ void ABPA_PlayerCharacter::HandleLookPitch(const FInputActionValue& Value)
     if (PitchInput == 0.0f)
         return;
 
+    const float AdjustedPitchInput = GetAdjustedPitchInput(PitchInput);
+
     AController* const OwnerController = GetController();
 
     if (OwnerController == nullptr)
@@ -533,7 +552,7 @@ void ABPA_PlayerCharacter::HandleLookPitch(const FInputActionValue& Value)
 
     FRotator ControlRotation = OwnerController->GetControlRotation();
     const float HalfCone = PitchConeAngleDegrees * 0.5f;
-    const float DesiredPitch = ControlRotation.Pitch + PitchInput;
+    const float DesiredPitch = ControlRotation.Pitch + AdjustedPitchInput;
     const float TargetPitch = FMath::ClampAngle(DesiredPitch, NeutralPitchDegrees - HalfCone, NeutralPitchDegrees + HalfCone);
     ControlRotation.Pitch = TargetPitch;
     OwnerController->SetControlRotation(ControlRotation);
@@ -545,13 +564,16 @@ void ABPA_PlayerCharacter::HandleLookPitch(const FInputActionValue& Value)
 /// Starts jump logic and routes hanging jump into ledge climb.
 void ABPA_PlayerCharacter::StartJump()
 {
-    if (RopeComponent != nullptr && RopeComponent->IsHanging())
+    if (RopeComponent != nullptr)
     {
         if (RopeComponent->RequestLedgeClimbFromJump())
             return;
 
-        // Ignore jump input while attached to the rope to keep the tether intact.
-        return;
+        if (RopeComponent->IsHanging())
+        {
+            // Ignore jump input while attached to the rope to keep the tether intact.
+            return;
+        }
     }
 
     UCharacterMovementComponent* const MoveComp = GetCharacterMovement();
@@ -908,9 +930,72 @@ void ABPA_PlayerCharacter::UpdateAimIcon()
 
 #pragma region Fall Handling
 
+/// Applies screen shake while falling beyond the fatal threshold.
+void ABPA_PlayerCharacter::ApplyFallCameraFeedback()
+{
+    if (FallCameraShakeClass == nullptr || Controller == nullptr)
+        return;
+
+    const float RampSeconds = FMath::Max(FallShakeRampSeconds, KINDA_SMALL_NUMBER);
+    const float ShakeScale = FMath::Clamp(FallOverThresholdTime / RampSeconds, 0.0f, 1.0f);
+
+    if (ShakeScale <= KINDA_SMALL_NUMBER)
+    {
+        StopFallCameraFeedback();
+        return;
+    }
+
+    APlayerController* const PC = Cast<APlayerController>(Controller);
+
+    if (PC == nullptr || PC->PlayerCameraManager == nullptr)
+        return;
+
+    if (ActiveFallShake.IsValid())
+    {
+        PC->PlayerCameraManager->StopCameraShake(ActiveFallShake.Get(), false);
+    }
+
+    ActiveFallShake = PC->PlayerCameraManager->StartCameraShake(FallCameraShakeClass, ShakeScale);
+    LastFallShakeScale = ShakeScale;
+}
+
+/// Stops any active fall shake and resets metrics.
+void ABPA_PlayerCharacter::StopFallCameraFeedback()
+{
+    if (!ActiveFallShake.IsValid() && LastFallShakeScale <= KINDA_SMALL_NUMBER)
+        return;
+
+    if (APlayerController* const PC = Cast<APlayerController>(Controller))
+    {
+        if (PC->PlayerCameraManager != nullptr && ActiveFallShake.IsValid())
+        {
+            PC->PlayerCameraManager->StopCameraShake(ActiveFallShake.Get(), true);
+        }
+    }
+
+    ActiveFallShake = nullptr;
+    LastFallShakeScale = 0.0f;
+}
+
+/// Fades the screen to black to cover respawn.
+void ABPA_PlayerCharacter::TriggerDeathFade()
+{
+    if (APlayerController* const PC = Cast<APlayerController>(Controller))
+    {
+        if (APlayerCameraManager* const CameraManager = PC->PlayerCameraManager)
+        {
+            CameraManager->StartCameraFade(0.0f, 1.0f, 0.25f, FLinearColor::Black, false, true);
+        }
+    }
+}
+
+
 /// Starts tracking fall distance when entering falling mode.
 void ABPA_PlayerCharacter::BeginFallTrace()
 {
+    if (bDeathSequenceActive)
+        return;
+
     if (!bTrackingFall)
     {
         bTrackingFall = true;
@@ -927,6 +1012,7 @@ void ABPA_PlayerCharacter::EndFallTrace(const float LandHeight)
         return;
 
     bTrackingFall = false;
+    StopFallCameraFeedback();
     const float FallDistance = FallStartZ - LandHeight;
 
     if (FallDistance >= FatalFallHeight)
@@ -939,6 +1025,13 @@ void ABPA_PlayerCharacter::EndFallTrace(const float LandHeight)
 /// Disables control and schedules respawn after fatal fall.
 void ABPA_PlayerCharacter::HandleFatalFall()
 {
+    if (bDeathSequenceActive)
+        return;
+
+    bDeathSequenceActive = true;
+    FallOverThresholdTime = 0.0f;
+    StopFallCameraFeedback();
+
     AController* const OwnerController = GetController();
 
     if (OwnerController != nullptr)
@@ -950,14 +1043,19 @@ void ABPA_PlayerCharacter::HandleFatalFall()
     if (RopeComponent != nullptr)
         RopeComponent->ForceReset();
 
-    FTimerHandle RespawnTimer;
-    GetWorldTimerManager().SetTimer(RespawnTimer, this, &ABPA_PlayerCharacter::Respawn, RespawnDelay, false);
+    TriggerDeathFade();
+
+    GetWorldTimerManager().ClearTimer(RespawnTimerHandle);
+    const float RespawnTime = FMath::Max(RespawnDelay, DeathFadeSeconds);
+    GetWorldTimerManager().SetTimer(RespawnTimerHandle, this, &ABPA_PlayerCharacter::Respawn, RespawnTime, false);
 }
 
 
 /// Teleports character to respawn point and re-enables movement.
 void ABPA_PlayerCharacter::Respawn()
 {
+    StopFallCameraFeedback();
+    GetWorldTimerManager().ClearTimer(RespawnTimerHandle);
     SetActorLocation(RespawnLocation, false);
     SetActorRotation(FRotator::ZeroRotator);
 
@@ -965,7 +1063,22 @@ void ABPA_PlayerCharacter::Respawn()
         OwnerController->EnableInput(nullptr);
 
     if (UCharacterMovementComponent* const MoveComp = GetCharacterMovement())
+    {
+        MoveComp->StopMovementImmediately();
         MoveComp->SetMovementMode(MOVE_Walking);
+    }
+
+    bDeathSequenceActive = false;
+    bTrackingFall = false;
+    FallOverThresholdTime = 0.0f;
+
+    if (APlayerController* const PC = Cast<APlayerController>(GetController()))
+    {
+        if (APlayerCameraManager* const CameraManager = PC->PlayerCameraManager)
+        {
+            CameraManager->StartCameraFade(1.0f, 0.0f, 0.35f, FLinearColor::Black, false, false);
+        }
+    }
 }
 #pragma endregion Fall Handling
 
@@ -1020,4 +1133,10 @@ void ABPA_PlayerCharacter::ApplySmoothedMovement(const float DeltaSeconds)
 
     AddMovementInput(ForwardDirection, SmoothedMoveInput.Y);
     AddMovementInput(RightDirection, SmoothedMoveInput.X);
+}
+
+/// Applies unified pitch inversion independent of aim state.
+float ABPA_PlayerCharacter::GetAdjustedPitchInput(const float RawPitch) const
+{
+    return bInvertAimLookPitch ? -RawPitch : RawPitch;
 }

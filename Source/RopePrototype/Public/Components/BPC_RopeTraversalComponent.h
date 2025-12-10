@@ -6,6 +6,7 @@
 #include "BPC_RopeTraversalComponent.generated.h"
 
 class ACharacter;
+class UCharacterMovementComponent;
 
 UENUM(BlueprintType)
 enum class ERopeState : uint8
@@ -115,6 +116,14 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Shortest rope length allowed while climbing in centimeters", AllowPrivateAccess="true"))
     float MinRopeLength;
 
+    // Summary: Minimum rope length enforced while player actively climbs; set to 0 to allow reaching the anchor.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Climb-specific minimum rope length clamp; use 0 to allow climbing up to the anchor", AllowPrivateAccess="true"))
+    float ClimbMinLength;
+
+    // Summary: Designer-facing distance used for anchor proximity checks.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Distance from the anchor considered 'at the top' for climb assists in centimeters", AllowPrivateAccess="true"))
+    float AnchorAssistDistance;
+
     // Summary: Speed at which rope arc travels toward target.
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Projectile speed for rope throw in centimeters per second", AllowPrivateAccess="true"))
     float ThrowSpeed;
@@ -150,6 +159,14 @@ protected:
     // Summary: Radius used to sample ledge when near anchor.
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Probe radius for detecting a climbable ledge near the rope anchor", AllowPrivateAccess="true"))
     float LedgeProbeRadius;
+
+    // Summary: Strength applied to ledge assist interpolation when jumping near the anchor.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Multiplier applied to ledge assist movement when the jump-ledged help is triggered", AllowPrivateAccess="true"))
+    float LedgeAssistStrength;
+
+    // Summary: Ground proximity threshold to avoid falling pose while climbing.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Distance from the ground where hanging switches to custom movement to suppress falling animation", AllowPrivateAccess="true"))
+    float GroundClimbProximity;
 #pragma endregion Serialized Fields
 
 #pragma region State
@@ -256,6 +273,15 @@ private:
 
     // Summary: Adjusts rope length from climb input with safety clamps.
     void ApplyClimbLengthChange(float DeltaTime);
+
+    // Summary: Returns sanitized minimum rope length that still allows climbing to the anchor.
+    float GetClimbMinLength() const;
+
+    // Summary: Returns sanitized minimum rope length used near anchor.
+    float GetMinAnchorLength() const;
+
+    // Summary: Returns current world-space distance from the player to the anchor.
+    float GetDistanceToAnchor() const;
 #pragma endregion Helpers
 #pragma endregion Methods
 };

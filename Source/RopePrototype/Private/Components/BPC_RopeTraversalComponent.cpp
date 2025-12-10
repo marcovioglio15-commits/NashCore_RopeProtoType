@@ -18,7 +18,9 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
 
     // Initialize serialized defaults for rope behavior tuning.
     MaxRopeLength = 1200.0f;
-    MinRopeLength = 200.0f;
+    MinRopeLength = 0.0f;
+    ClimbMinLength = 0.0f;
+    AnchorAssistDistance = 120.0f;
     ThrowSpeed = 2400.0f;
     RecallHoldSeconds = 1.0f;
     RecallRetractSpeed = 2600.0f;
@@ -28,6 +30,8 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     LedgeNormalDotThreshold = 0.45f;
     GrabDistance = 200.0f;
     LedgeProbeRadius = 60.0f;
+    LedgeAssistStrength = 1.0f;
+    GroundClimbProximity = 120.0f;
 
     // Seed runtime state for rope status and timers.
     CurrentRopeLength = MaxRopeLength;
@@ -206,7 +210,7 @@ void UBPC_RopeTraversalComponent::ThrowRope()
     {
         AnchorLocation = RopeFlightTarget;
         AnchorNormal = PreviewImpactNormal;
-        CurrentRopeLength = FMath::Clamp(Distance, MinRopeLength, MaxRopeLength);
+        CurrentRopeLength = FMath::Clamp(Distance, GetClimbMinLength(), MaxRopeLength);
         bRopeAttached = true;
         bHoldingRope = Distance <= MaxRopeLength;
         if (bHoldingRope)
@@ -281,7 +285,7 @@ void UBPC_RopeTraversalComponent::CancelRecall()
     {
         RopeState = bHanging ? ERopeState::Hanging : ERopeState::Attached;
         RecallAccumulated = 0.0f;
-        CurrentRopeLength = FMath::Max(CurrentRopeLength, MinRopeLength);
+        CurrentRopeLength = FMath::Max(CurrentRopeLength, GetClimbMinLength());
     }
 
     // Disable tick when nothing requires simulation.
@@ -445,10 +449,24 @@ float UBPC_RopeTraversalComponent::GetCurrentRopeLength() const
 
 bool UBPC_RopeTraversalComponent::RequestLedgeClimbFromJump()
 {
-    // Jump-triggered ledge climb only fires when hanging near the anchor.
-    if (!CanProcessClimbInput() || CurrentRopeLength > MinRopeLength + 8.0f)
+    // Jump-triggered ledge climb now requires explicit input while near the anchor.
+    if (!OwningCharacter.IsValid() || !bRopeAttached)
     {
         return false;
+    }
+
+    const float AnchorDistance = GetDistanceToAnchor();
+    const float EffectiveDistance = FMath::Min(CurrentRopeLength, AnchorDistance);
+    const bool bWithinAssistDistance = EffectiveDistance <= AnchorAssistDistance + 8.0f;
+
+    if (!bWithinAssistDistance)
+    {
+        return false;
+    }
+
+    if (!bHanging)
+    {
+        EnterHanging();
     }
 
     return TryClimbToLedge();
@@ -523,7 +541,7 @@ void UBPC_RopeTraversalComponent::CompleteRopeFlight()
     RopeState = ERopeState::Attached;
     AnchorLocation = RopeFlightTarget;
     AnchorNormal = PreviewImpactNormal;
-    CurrentRopeLength = FMath::Clamp(FVector::Distance(OwningCharacter.IsValid() ? OwningCharacter->GetActorLocation() : RopeFlightStart, AnchorLocation), MinRopeLength, MaxRopeLength);
+    CurrentRopeLength = FMath::Clamp(FVector::Distance(OwningCharacter.IsValid() ? OwningCharacter->GetActorLocation() : RopeFlightStart, AnchorLocation), GetClimbMinLength(), MaxRopeLength);
     bRopeAttached = true;
     bHoldingRope = bPreviewWithinRange;
     if (bHoldingRope)
@@ -632,6 +650,20 @@ void UBPC_RopeTraversalComponent::TickHanging(const float DeltaTime)
         return;
     }
 
+    // Exit hanging if close enough to grounded surface to avoid falling animations.
+    if (GroundClimbProximity > 0.0f && MoveComp->CurrentFloor.bBlockingHit && MoveComp->CurrentFloor.FloorDist <= GroundClimbProximity)
+    {
+        ExitHanging();
+        RopeState = bRopeAttached ? ERopeState::Attached : ERopeState::Idle;
+
+        if (UCharacterMovementComponent* const PostMoveComp = OwningCharacter->GetCharacterMovement())
+        {
+            PostMoveComp->SetMovementMode(MOVE_Walking);
+        }
+
+        return;
+    }
+
     // Update current rope length based on climb input.
     ApplyClimbLengthChange(DeltaTime);
 
@@ -681,12 +713,6 @@ void UBPC_RopeTraversalComponent::TickHanging(const float DeltaTime)
 
     // Clear swing input after applying.
     PendingSwingInput = FVector2D::ZeroVector;
-
-    // Attempt ledge climb when ascending near the anchor.
-    if (ClimbInputSign > 0 && CurrentRopeLength <= MinRopeLength + 10.0f)
-    {
-        TryClimbToLedge();
-    }
 }
 
 void UBPC_RopeTraversalComponent::TickTether(const float DeltaTime)
@@ -705,7 +731,7 @@ void UBPC_RopeTraversalComponent::TickTether(const float DeltaTime)
         return;
     }
 
-    CurrentRopeLength = FMath::Clamp(CurrentRopeLength, MinRopeLength, MaxRopeLength);
+    CurrentRopeLength = FMath::Clamp(CurrentRopeLength, GetClimbMinLength(), MaxRopeLength);
 
     const FVector ActorLocation = OwningCharacter->GetActorLocation();
     const FVector RopeVector = ActorLocation - AnchorLocation;
@@ -748,7 +774,7 @@ void UBPC_RopeTraversalComponent::EngageHoldConstraint()
     RopeState = ERopeState::Attached;
 
     const float Distance = FVector::Distance(OwningCharacter->GetActorLocation(), AnchorLocation);
-    CurrentRopeLength = FMath::Clamp(Distance, MinRopeLength, MaxRopeLength);
+    CurrentRopeLength = FMath::Clamp(Distance, GetClimbMinLength(), MaxRopeLength);
 
     UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
 
@@ -765,6 +791,27 @@ bool UBPC_RopeTraversalComponent::CanProcessClimbInput() const
 {
     // Climb input is only relevant while the rope is attached and the player is engaged with it.
     return bRopeAttached && (bHanging || bHoldingRope);
+}
+
+float UBPC_RopeTraversalComponent::GetMinAnchorLength() const
+{
+    return FMath::Max(AnchorAssistDistance, 0.0f);
+}
+
+float UBPC_RopeTraversalComponent::GetDistanceToAnchor() const
+{
+    if (!OwningCharacter.IsValid())
+    {
+        return CurrentRopeLength;
+    }
+
+    return FVector::Distance(OwningCharacter->GetActorLocation(), AnchorLocation);
+}
+
+float UBPC_RopeTraversalComponent::GetClimbMinLength() const
+{
+    // Climb clamp dedicated to climbing; keep at zero to always reach the anchor.
+    return FMath::Max(ClimbMinLength, 0.0f);
 }
 
 void UBPC_RopeTraversalComponent::ApplyClimbLengthChange(const float DeltaTime)
@@ -785,7 +832,7 @@ void UBPC_RopeTraversalComponent::ApplyClimbLengthChange(const float DeltaTime)
     }
 
     const float TargetLength = CurrentRopeLength - ClimbInputSign * ClimbSpeed * DeltaTime;
-    CurrentRopeLength = FMath::Clamp(TargetLength, MinRopeLength, MaxRopeLength);
+    CurrentRopeLength = FMath::Clamp(TargetLength, GetClimbMinLength(), MaxRopeLength);
 
     if (bClimbingDown && CurrentRopeLength >= MaxRopeLength - 0.5f)
     {
@@ -797,16 +844,30 @@ void UBPC_RopeTraversalComponent::ApplyClimbLengthChange(const float DeltaTime)
 bool UBPC_RopeTraversalComponent::TryClimbToLedge()
 {
     // Do nothing without a valid character.
-    if (!OwningCharacter.IsValid() || !bRopeAttached || !bHanging)
+    if (!OwningCharacter.IsValid() || !bRopeAttached || (!bHanging && !bHoldingRope))
     {
         return false;
     }
 
-    const bool bNearAnchor = CurrentRopeLength <= MinRopeLength + 8.0f;
+    const float AnchorDistance = GetDistanceToAnchor();
+    const float EffectiveDistance = FMath::Min(CurrentRopeLength, AnchorDistance);
+    const bool bNearAnchor = EffectiveDistance <= GetMinAnchorLength() + 8.0f;
 
     if (!bNearAnchor)
     {
         return false;
+    }
+
+    const bool bEnteredFromHold = !bHanging;
+
+    if (bEnteredFromHold)
+    {
+        EnterHanging();
+
+        if (!bHanging)
+        {
+            return false;
+        }
     }
 
     // Sweep upward near anchor normal to find a landing ledge.
@@ -833,6 +894,9 @@ bool UBPC_RopeTraversalComponent::TryClimbToLedge()
         }
     }
 
+    const float AssistAlpha = FMath::Clamp(LedgeAssistStrength, 0.0f, 1.0f);
+    TargetLocation = FMath::Lerp(OwningCharacter->GetActorLocation(), TargetLocation, AssistAlpha);
+
     UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
 
     if (MoveComp != nullptr && MoveComp->UpdatedComponent != nullptr)
@@ -850,7 +914,7 @@ bool UBPC_RopeTraversalComponent::TryClimbToLedge()
     ExitHanging();
     RopeState = ERopeState::Attached;
     bHoldingRope = true;
-    CurrentRopeLength = FMath::Clamp(FVector::Distance(OwningCharacter->GetActorLocation(), AnchorLocation), MinRopeLength, MaxRopeLength);
+    CurrentRopeLength = FMath::Clamp(GetDistanceToAnchor(), GetClimbMinLength(), MaxRopeLength);
     SetComponentTickEnabled(true);
 
     return true;
