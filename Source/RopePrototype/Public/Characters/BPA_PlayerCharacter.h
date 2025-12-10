@@ -22,6 +22,8 @@ class UStaticMesh;
 class UMaterialInterface;
 class USkeletalMesh;
 class UUserWidget;
+class UCameraShakeBase;
+struct FTimerHandle;
 enum class EInputAxisSwizzle : uint8;
 struct FInputActionValue;
 
@@ -207,6 +209,11 @@ protected:
     float FallShakeRampSeconds;
 
     
+    /// Camera shake played while falling beyond fatal height.
+    UPROPERTY(EditDefaultsOnly, Category="Health", meta=(Tooltip="Camera shake class used while exceeding fatal fall height", AllowPrivateAccess="true"))
+    TSubclassOf<UCameraShakeBase> FallCameraShakeClass;
+
+    
     /// Starting location used for respawn.
     UPROPERTY(EditInstanceOnly, Category="Checkpoint", meta=(Tooltip="Spawn point used when resetting the character", AllowPrivateAccess="true"))
     FVector RespawnLocation;
@@ -220,6 +227,10 @@ protected:
     /// Pitch cone angle centered on forward alignment in degrees.
     UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Camera", meta=(DisplayName="Pitch Cone Angle", Tooltip="Total pitch cone angle centered on forward alignment; clamped symmetrically up and down", AllowPrivateAccess="true"))
     float PitchConeAngleDegrees;
+
+    /// Inverts pitch input for all camera control, including aim.
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Camera", meta=(DisplayName="Invert Look Pitch", Tooltip="If true, vertical look input is inverted for all camera control, including aim mode", AllowPrivateAccess="true"))
+    bool bInvertAimLookPitch;
 #pragma endregion Camera Clamp
 
 #pragma region Input Smoothing
@@ -346,6 +357,26 @@ protected:
     
     /// Last known hang state to detect transitions.
     bool bWasHanging;
+
+    
+    /// Suppresses fall distance tracking while attached to a rope.
+    bool bIgnoreFallFromRope;
+
+    
+    /// Whether a death/reset sequence is active.
+    bool bDeathSequenceActive;
+
+    
+    /// Active fall shake instance while beyond fatal height.
+    TWeakObjectPtr<UCameraShakeBase> ActiveFallShake;
+
+    
+    /// Last applied shake scale for fall feedback.
+    float LastFallShakeScale;
+
+    
+    /// Timer handle used for delayed respawn.
+    FTimerHandle RespawnTimerHandle;
 #pragma endregion State
 #pragma endregion Variables And Properties
 
@@ -423,6 +454,9 @@ private:
 
     /// Applies smoothed movement input to character locomotion.
     void ApplySmoothedMovement(float DeltaSeconds);
+
+    /// Returns pitch input with user inversion applied uniformly across aim and free look.
+    float GetAdjustedPitchInput(float RawPitch) const;
 #pragma endregion Input
 
 #pragma region Helpers
@@ -485,6 +519,18 @@ private:
     
     /// Shows aim icon feedback based on preview validity.
     void UpdateAimIcon();
+
+    
+    /// Applies camera shake feedback while falling past the fatal threshold.
+    void ApplyFallCameraFeedback();
+
+    
+    /// Stops fall camera shake and resets accumulators.
+    void StopFallCameraFeedback();
+
+    
+    /// Triggers and manages death fade to black.
+    void TriggerDeathFade();
 #pragma endregion Helpers
 #pragma endregion Methods
 };
