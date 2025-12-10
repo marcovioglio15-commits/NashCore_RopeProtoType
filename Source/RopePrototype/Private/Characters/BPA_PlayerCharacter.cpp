@@ -104,6 +104,7 @@ ABPA_PlayerCharacter::ABPA_PlayerCharacter()
     SmoothedMoveInput = FVector2D::ZeroVector;
     NeutralPitchDegrees = GetActorRotation().Pitch;
     bWasHanging = false;
+    bIgnoreFallFromRope = false;
     bDeathSequenceActive = false;
     LastFallShakeScale = 0.0f;
     ActiveFallShake = nullptr;
@@ -246,6 +247,26 @@ void ABPA_PlayerCharacter::Tick(const float DeltaSeconds)
     UpdateAimIcon();
     UpdateRopeSwingInput();
     TickLevelTimer(DeltaSeconds);
+
+    const bool bRopeAttached = RopeComponent != nullptr && RopeComponent->IsAttached();
+
+    if (bRopeAttached)
+    {
+        bIgnoreFallFromRope = true;
+        bTrackingFall = false;
+        FallOverThresholdTime = 0.0f;
+        StopFallCameraFeedback();
+    }
+    else if (bIgnoreFallFromRope)
+    {
+        bIgnoreFallFromRope = false;
+
+        if (UCharacterMovementComponent* const MoveComp = GetCharacterMovement())
+        {
+            if (MoveComp->IsFalling())
+                BeginFallTrace();
+        }
+    }
 
     if (bTrackingFall)
     {
@@ -493,10 +514,19 @@ void ABPA_PlayerCharacter::OnMovementModeChanged(const EMovementMode PrevMovemen
 
     if (UCharacterMovementComponent* const MoveComp = GetCharacterMovement())
     {
+        const bool bRopeAttached = RopeComponent != nullptr && RopeComponent->IsAttached();
+
         if (MoveComp->MovementMode == MOVE_Falling)
-            BeginFallTrace();
+        {
+            if (!bRopeAttached)
+                BeginFallTrace();
+            else
+                bIgnoreFallFromRope = true;
+        }
         else if (bTrackingFall)
+        {
             EndFallTrace(GetActorLocation().Z);
+        }
     }
     else if (bTrackingFall)
     {
@@ -994,6 +1024,9 @@ void ABPA_PlayerCharacter::TriggerDeathFade()
 void ABPA_PlayerCharacter::BeginFallTrace()
 {
     if (bDeathSequenceActive)
+        return;
+
+    if (bIgnoreFallFromRope)
         return;
 
     if (!bTrackingFall)

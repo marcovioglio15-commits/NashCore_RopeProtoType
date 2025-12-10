@@ -359,6 +359,10 @@ protected:
     bool bWasHanging;
 
     
+    /// Suppresses fall distance tracking while attached to a rope.
+    bool bIgnoreFallFromRope;
+
+    
     /// Whether a death/reset sequence is active.
     bool bDeathSequenceActive;
 

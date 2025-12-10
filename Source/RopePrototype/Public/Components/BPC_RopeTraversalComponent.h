@@ -164,9 +164,25 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Multiplier applied to ledge assist movement when the jump-ledged help is triggered", AllowPrivateAccess="true"))
     float LedgeAssistStrength;
 
+    // Summary: Planar offset from the ledge to place the character after climbing.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Distance in centimeters pushed away from the ledge along the anchor normal projected on the ground plane", AllowPrivateAccess="true"))
+    float LedgeStandOffDistance;
+
+    // Summary: Vertical offset added to the final climb target.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Vertical offset in centimeters applied to the climb snap target", AllowPrivateAccess="true"))
+    float LedgeVerticalOffset;
+
+    // Summary: Cooldown window to avoid repeated ledge climb triggers.
+    UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Minimum time in seconds between ledge climb assists triggered from jump", AllowPrivateAccess="true"))
+    float LedgeClimbCooldownSeconds;
+
     // Summary: Ground proximity threshold to avoid falling pose while climbing.
     UPROPERTY(EditDefaultsOnly, Category="Rope", meta=(ToolTip="Distance from the ground where hanging switches to custom movement to suppress falling animation", AllowPrivateAccess="true"))
     float GroundClimbProximity;
+
+    // Summary: Enables debug draw for rope distances, probes, and assist areas.
+    UPROPERTY(EditDefaultsOnly, Category="Debug", meta=(ToolTip="Draw debug spheres/lines for rope assist distances and ledge probes", AllowPrivateAccess="true"))
+    bool bDebugRopeAssist;
 #pragma endregion Serialized Fields
 
 #pragma region State
@@ -232,6 +248,9 @@ protected:
 
     // Summary: Tracks aim preview when rope already attached.
     bool bAimPreviewWhileAttached;
+
+    // Summary: Timestamp of last successful ledge climb assist to enforce cooldown.
+    float LastLedgeClimbTime;
 #pragma endregion State
 #pragma endregion Variables And Properties
 

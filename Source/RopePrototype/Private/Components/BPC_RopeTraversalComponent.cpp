@@ -16,7 +16,7 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     PrimaryComponentTick.TickGroup = TG_PostPhysics;
     PrimaryComponentTick.bStartWithTickEnabled = false;
 
-    // Initialize serialized defaults for rope behavior tuning.
+    // Initialize serialized defaults for rope behavior tuning (scaled for ~1m ledges).
     MaxRopeLength = 1200.0f;
     MinRopeLength = 0.0f;
     ClimbMinLength = 0.0f;
@@ -28,10 +28,14 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     SwingDamping = 0.05f;
     ClimbSpeed = 200.0f;
     LedgeNormalDotThreshold = 0.45f;
-    GrabDistance = 200.0f;
-    LedgeProbeRadius = 60.0f;
-    LedgeAssistStrength = 1.0f;
+    GrabDistance = 140.0f;
+    LedgeProbeRadius = 50.0f;
+    LedgeAssistStrength = 0.9f;
+    LedgeStandOffDistance = 28.0f;
+    LedgeVerticalOffset = 0.0f;
+    LedgeClimbCooldownSeconds = 0.35f;
     GroundClimbProximity = 120.0f;
+    bDebugRopeAssist = false;
 
     // Seed runtime state for rope status and timers.
     CurrentRopeLength = MaxRopeLength;
@@ -51,6 +55,7 @@ UBPC_RopeTraversalComponent::UBPC_RopeTraversalComponent()
     RopeFlightStart = FVector::ZeroVector;
     RopeFlightTarget = FVector::ZeroVector;
     bAimPreviewWhileAttached = false;
+    LastLedgeClimbTime = -1000.0f;
 }
 
 void UBPC_RopeTraversalComponent::BeginPlay()
@@ -455,9 +460,30 @@ bool UBPC_RopeTraversalComponent::RequestLedgeClimbFromJump()
         return false;
     }
 
+    UWorld* const World = GetWorld();
+
+    if (World == nullptr)
+    {
+        return false;
+    }
+
+    const float Now = World->GetTimeSeconds();
+
+    if (LedgeClimbCooldownSeconds > 0.0f && Now - LastLedgeClimbTime < LedgeClimbCooldownSeconds)
+    {
+        return false;
+    }
+
     const float AnchorDistance = GetDistanceToAnchor();
     const float EffectiveDistance = FMath::Min(CurrentRopeLength, AnchorDistance);
     const bool bWithinAssistDistance = EffectiveDistance <= AnchorAssistDistance + 8.0f;
+
+    if (bDebugRopeAssist)
+    {
+        DrawDebugSphere(World, AnchorLocation, AnchorAssistDistance, 16, FColor::Cyan, false, 1.0f, 0, 2.0f);
+        DrawDebugSphere(World, AnchorLocation, GetMinAnchorLength(), 16, FColor::Yellow, false, 1.0f, 0, 1.5f);
+        DrawDebugLine(World, OwningCharacter->GetActorLocation(), AnchorLocation, bWithinAssistDistance ? FColor::Green : FColor::Red, false, 1.0f, 0, 1.5f);
+    }
 
     if (!bWithinAssistDistance)
     {
@@ -469,7 +495,14 @@ bool UBPC_RopeTraversalComponent::RequestLedgeClimbFromJump()
         EnterHanging();
     }
 
-    return TryClimbToLedge();
+    const bool bClimbed = TryClimbToLedge();
+
+    if (bClimbed)
+    {
+        LastLedgeClimbTime = Now;
+    }
+
+    return bClimbed;
 }
 #pragma endregion Release And Query
 
@@ -849,12 +882,24 @@ bool UBPC_RopeTraversalComponent::TryClimbToLedge()
         return false;
     }
 
+    UWorld* const World = GetWorld();
+
+    if (World == nullptr)
+    {
+        return false;
+    }
+
     const float AnchorDistance = GetDistanceToAnchor();
     const float EffectiveDistance = FMath::Min(CurrentRopeLength, AnchorDistance);
     const bool bNearAnchor = EffectiveDistance <= GetMinAnchorLength() + 8.0f;
 
     if (!bNearAnchor)
     {
+        if (bDebugRopeAssist)
+        {
+            DrawDebugSphere(World, AnchorLocation, GetMinAnchorLength(), 16, FColor::Yellow, false, 1.0f, 0, 1.5f);
+        }
+
         return false;
     }
 
@@ -878,7 +923,13 @@ bool UBPC_RopeTraversalComponent::TryClimbToLedge()
     FCollisionQueryParams Params;
     Params.AddIgnoredActor(OwningCharacter.Get());
 
-    const bool bHit = GetWorld()->SweepSingleByChannel(HitResult, ProbeStart, ProbeEnd, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(LedgeProbeRadius), Params);
+    if (bDebugRopeAssist)
+    {
+        DrawDebugSphere(World, ProbeStart, LedgeProbeRadius, 16, FColor::Orange, false, 1.0f, 0, 2.0f);
+        DrawDebugLine(World, ProbeStart, ProbeEnd, FColor::Orange, false, 1.0f, 0, 1.5f);
+    }
+
+    const bool bHit = World->SweepSingleByChannel(HitResult, ProbeStart, ProbeEnd, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(LedgeProbeRadius), Params);
 
     const float CapsuleHalfHeight = OwningCharacter->GetSimpleCollisionHalfHeight();
     const FVector FallbackTarget = AnchorLocation + FVector::UpVector * CapsuleHalfHeight;
@@ -886,29 +937,76 @@ bool UBPC_RopeTraversalComponent::TryClimbToLedge()
 
     if (bHit)
     {
-        const float NormalDot = FVector::DotProduct(HitResult.ImpactNormal, AnchorNormal);
+    const float NormalDot = FVector::DotProduct(HitResult.ImpactNormal, AnchorNormal);
+    const bool bUpwardNormal = HitResult.ImpactNormal.Z >= 0.55f;
+    const bool bValidNormal = NormalDot >= LedgeNormalDotThreshold || bUpwardNormal;
 
-        if (NormalDot >= LedgeNormalDotThreshold)
+    if (bValidNormal)
+    {
+        const float StandOff = FMath::Max(LedgeStandOffDistance, 0.0f);
+        const float VerticalOffset = LedgeVerticalOffset;
+        FVector PlanarNormal = AnchorNormal;
+        PlanarNormal.Z = 0.0f;
+
+        if (PlanarNormal.IsNearlyZero())
         {
-            TargetLocation = HitResult.ImpactPoint + FVector::UpVector * CapsuleHalfHeight + AnchorNormal * 18.0f;
+            PlanarNormal = OwningCharacter->GetActorForwardVector();
+            PlanarNormal.Z = 0.0f;
         }
+
+        PlanarNormal = PlanarNormal.GetSafeNormal();
+        const FVector PlanarOffset = -PlanarNormal * StandOff;
+        TargetLocation = HitResult.ImpactPoint + FVector::UpVector * (CapsuleHalfHeight + VerticalOffset) + PlanarOffset;
+
+        if (bDebugRopeAssist)
+        {
+            DrawDebugDirectionalArrow(World, HitResult.ImpactPoint, HitResult.ImpactPoint + HitResult.ImpactNormal * 80.0f, 24.0f, FColor::Blue, false, 1.0f, 0, 2.0f);
+        }
+    }
     }
 
     const float AssistAlpha = FMath::Clamp(LedgeAssistStrength, 0.0f, 1.0f);
     TargetLocation = FMath::Lerp(OwningCharacter->GetActorLocation(), TargetLocation, AssistAlpha);
 
+    if (bDebugRopeAssist)
+    {
+        DrawDebugSphere(World, TargetLocation, 20.0f, 12, FColor::Green, false, 1.0f, 0, 1.5f);
+    }
+
     UCharacterMovementComponent* const MoveComp = OwningCharacter->GetCharacterMovement();
+    bool bMovedToTarget = false;
 
     if (MoveComp != nullptr && MoveComp->UpdatedComponent != nullptr)
     {
         FHitResult MoveHit;
         const FVector Delta = TargetLocation - OwningCharacter->GetActorLocation();
         MoveComp->SafeMoveUpdatedComponent(Delta, OwningCharacter->GetActorRotation(), true, MoveHit);
+        bMovedToTarget = !MoveHit.bBlockingHit || MoveHit.Time > 0.0f;
+
+        if (!bMovedToTarget)
+        {
+            FHitResult TeleportHit;
+            const bool bTeleported = OwningCharacter->SetActorLocation(TargetLocation, true, &TeleportHit, ETeleportType::TeleportPhysics);
+            bMovedToTarget = bTeleported || (!TeleportHit.bBlockingHit && !TeleportHit.bStartPenetrating);
+        }
+
+        if (!bMovedToTarget)
+        {
+            OwningCharacter->SetActorLocation(TargetLocation, false);
+            bMovedToTarget = true;
+        }
+
         MoveComp->SetMovementMode(MOVE_Walking);
     }
     else
     {
         OwningCharacter->SetActorLocation(TargetLocation, false);
+        bMovedToTarget = true;
+    }
+
+    if (!bMovedToTarget)
+    {
+        return false;
     }
 
     ExitHanging();
