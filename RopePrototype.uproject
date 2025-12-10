@@ -24,7 +24,7 @@
 		},
 		{
 			"Name": "ComicShaders",
-			"Enabled": true
+			"Enabled": false
 		}
 	]
 }
