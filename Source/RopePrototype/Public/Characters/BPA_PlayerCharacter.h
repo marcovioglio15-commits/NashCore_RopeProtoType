@@ -61,6 +61,10 @@ public:
     
     /// Stops timer and locks controls when level is complete.
     void CompleteLevel();
+
+    
+    /// Plays the standard death-style fade for level exit sequences.
+    void PlayLevelExitFade();
 #pragma endregion Methods
 
 protected:

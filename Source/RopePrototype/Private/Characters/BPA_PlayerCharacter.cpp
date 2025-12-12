@@ -1126,6 +1126,12 @@ void ABPA_PlayerCharacter::CompleteLevel()
         OwnerController->DisableInput(nullptr);
 }
 
+/// Plays the death-style fade without scheduling a respawn.
+void ABPA_PlayerCharacter::PlayLevelExitFade()
+{
+    TriggerDeathFade();
+}
+
 
 /// Forwards cached movement to rope swing input when hanging.
 void ABPA_PlayerCharacter::UpdateRopeSwingInput()
